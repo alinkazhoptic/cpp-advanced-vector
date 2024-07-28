@@ -126,24 +126,6 @@ private:
 
 private:
 
-    // Вызывает деструктор объекта по адресу buf
-    // деструктор шаблона T yt должен выбрасывать исключений
-    static void Destroy(T* buf) noexcept {
-        buf->~T();
-    }
-
-    // Вызывает деструкторы n объектов массива по адресу buf
-    static void DestroyN(T* buf, size_t n) noexcept {
-        for (size_t i = 0; i != n; ++i) {
-            Destroy(buf + i);
-        }
-    }
-
-    // Создаёт копию объекта elem в сырой памяти по адресу buf
-    static void CopyConstruct(T* buf, const T& elem) {
-        new (buf) T(elem);
-    }
-
     inline constexpr void SafeCopyingOrMoving (T* from, size_t n_el, T* to) {
         if constexpr (std::is_nothrow_move_constructible_v<T> || !std::is_copy_constructible_v<T>) { 
             // копировать нельзя или при перемещении нет исключений
