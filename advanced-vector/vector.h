@@ -126,6 +126,8 @@ private:
 
 private:
 
+    // В зависимости от наличия и свойств конструкторов копирует или перемещает заданное количество элементов.
+    // ! Может выкинуть исключение! 
     inline constexpr void SafeCopyingOrMoving (T* from, size_t n_el, T* to) {
         if constexpr (std::is_nothrow_move_constructible_v<T> || !std::is_copy_constructible_v<T>) { 
             // копировать нельзя или при перемещении нет исключений
@@ -278,8 +280,15 @@ public:
             RawMemory<T> new_data(new_capacity);
             // перемещаем в конец новый элемент
             new (new_data + size_) T(std::forward<Args>(args)...);
-            // копируем или перемещаем все элементы исходного вектора в новую область
-            SafeCopyingOrMoving(data_.GetAddress(), size_, new_data.GetAddress());
+            try {
+                // копируем или перемещаем все элементы исходного вектора в новую область
+                SafeCopyingOrMoving(data_.GetAddress(), size_, new_data.GetAddress());
+            } catch (const std::exception& e) {
+                // удаляем уже созданный элемент
+                std::destroy_at(new_data + size_);
+                throw;
+            }
+            
             data_.Swap(new_data);
             std::destroy_n(new_data.GetAddress(), size_);
         }
@@ -292,15 +301,12 @@ public:
         return data_[size_ - 1];
     }
 
-    // Копирующий push_back
-    // Вариант 2 - через EmplaceBack 
+    // Вариант 2 - Использует EmplaceBack 
     void PushBack(const T& value) {
         EmplaceBack(value);
     }
 
-    // Перемещающий push_back
-    // работает эффективнее для временных объектов 
-    // Вариант 2 - через EmplaceBack
+    // Вариант 2 - использует EmplaceBack
     void PushBack(T&& value) {
         EmplaceBack(std::move(value));
     }
@@ -308,6 +314,7 @@ public:
 
 
     void PopBack() noexcept {
+        assert(size_ > 0);
         // удаляем один элемент
         std::destroy_n(data_ + size_ - 1, 1);
         --size_;
@@ -345,6 +352,9 @@ public:
 
     template <typename... Args>
     iterator Emplace(const_iterator pos, Args&&... args) {
+        // проверка адекватности итератора
+        assert(pos >= begin() && pos <= end());
+
         size_t pos_index = std::distance(cbegin(), pos);
         if (size_ == Capacity()) {
             // Создаем новый вектор
@@ -356,11 +366,11 @@ public:
             
             // копируем/перемещаем элементы исходного вектора до позиции вставки
             try {
-                // to do: +1 ??
                 SafeCopyingOrMoving(begin(), (pos_index), new_data.GetAddress());
             }
-            catch (...) {
+            catch (const std::exception& e) {
                 std::destroy_at(new_data + pos_index);
+                throw;
             }
 
             // копируем элементы исходного вектора после позиции вставки
@@ -368,8 +378,9 @@ public:
                 // to do: +1 ??
                 SafeCopyingOrMoving(begin() + pos_index, (size_ - pos_index), (new_data + pos_index + 1));
             }
-            catch (...) {
-                std::destroy(new_data.GetAddress(), new_data + pos_index);
+            catch (const std::exception& e) {
+                std::destroy(new_data.GetAddress(), new_data + pos_index + 1);
+                throw;
             }
             // Заменяем data_ на новый созданный вектор
             data_.Swap(new_data);
@@ -387,45 +398,46 @@ public:
                 ++size_;
                 return data_ + pos_index;
             }
-            // Переместить последний элемент 
-            std::move(end() - 1, end(), end());
-            ++size_;
+            // Частный случай - вставка в конец
+            if (pos == end()) {
+                // создаем временную копию
+                T* res = new (data_ + size_) T(std::forward<Args>(args)...);
+                ++size_;
+                return res;
+            }
             // создаем временную копию
             T new_el(std::forward<Args>(args)...);
 
+            // Переместить последний элемент 
+            std::uninitialized_move(end() - 1, end(), end());  // новая область неинициализированна
+            ++size_;
+            
+
             // сдвигаем элементы от старого end до pos, двигаясь вправо
-            if constexpr (std::is_nothrow_move_constructible_v<T> || !std::is_copy_constructible_v<T>) { 
-                // копировать нельзя или при перемещении нет исключений
-                std::move_backward(begin() + pos_index, end() - 2, end() - 1);
-            } else {
-                // если возможны исключения при перемещении
-                std::copy_backward(begin() + pos_index, end() - 2, end() - 1);
-            }
+            std::move_backward(begin() + pos_index, end() - 2, end() - 1);
 
-            // конструируем новый элемент в заданной позиции
-            new (data_ + pos_index) T(std::move(new_el));
-
+            // перемещаем новый элемент в заданной позиции
+            data_[pos_index] = std::move(new_el);  // просто перемещаем, так как область уже проинициализирована
         }
         
         // вернуть итератор на вставленный элемент
         return data_ + pos_index;
     }
-
-    // Вставка нового элемента в указанную позицию
-    // Вариант 2 - через Emplace
+    
+    
+    // Вставка копированием - Вариант 2 - через Emplace
     iterator Insert(const_iterator pos, const T& value) {
         return Emplace(pos, value);
     }
-
-
-    // Вставка нового элемента в указанную позицию (эффективнее для временных объектов)
-    // Вариант 2 - через Emplace
+    
+    // Вставка перемещением - Вариант 2 - через Emplace
     iterator Insert(const_iterator pos, T&& value) {
         return Emplace(pos, std::move(value));
     } 
     
 
     iterator Erase(const_iterator pos) {
+        assert(pos >= begin() && pos < end());
         size_t pos_index = std::distance(cbegin(), pos);
         // Перемещаем элементы, следующие за удаляемым
         std::move(begin() + pos_index + 1, end(), begin() + pos_index);
